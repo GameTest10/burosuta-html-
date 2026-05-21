@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>ミニ・ブロスタ（生存人数カウント版）</title>
+    <style>
+        body { text-align: center; background: #222; color: #fff; font-family: sans-serif; margin: 0; padding: 20px; overflow: hidden; }
+        canvas { background: #3c7a3c; border: 4px solid #fff; display: none; margin: 10px auto; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+        .menu { margin: 50px auto; max-width: 500px; background: #333; padding: 20px; border-radius: 10px; border: 2px solid #555; }
+        button { font-size: 18px; padding: 10px 20px; margin: 10px; cursor: pointer; border-radius: 5px; border: none; font-weight: bold; }
+        .edgar { background: #bf55ec; color: white; }
+        .frank { background: #9b59b6; color: white; }
+        .colt { background: #e74c3c; color: white; }
+    </style>
+</head>
+<body>
+
+    <h1>ミニ・ブロスタ (生存人数カウンター搭載)</h1>
+
+    <div id="selectMenu" class="menu">
+        <h2>キャラクターを選択してください</h2>
+        <button class="edgar" onclick="startGame('edgar')">エドガー (近距離/高速)</button>
+        <button class="frank" onclick="startGame('frank')">フランク (中距離/タフ)</button>
+        <button class="colt" onclick="startGame('colt')">コルト (長距離連射)</button>
+    </div>
+
+    <div id="gameUI" style="display:none;">
+        <p>【操作】移動: 矢印キー | 自動攻撃: スペースキー | 手動狙い: マウス左クリック</p>
+        <p id="retryInfo" style="color: #55ff55; font-weight: bold;">総勢11人のバトルロイヤル！最後まで生き残れ！</p>
+        <canvas id="gameCanvas" width="900" height="550"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+
+        const WORLD_WIDTH = 3500;
+        const WORLD_HEIGHT = 2500;
+
+        let gasSafeBounds = { minX: 0, maxX: WORLD_WIDTH, minY: 0, maxY: WORLD_HEIGHT };
+        const GAS_SPEED = 0.2;
+        const MIN_SAFE_SIZE = 400;
+
+        const charStats = {
+            edgar: { name: "エドガー", hp: 6600, maxHp: 6600, speed: 3.2, type: "edgar", color: "#bf55ec", range: 80, damage: 1080 },
+            frank: { name: "フランク", hp: 14000, maxHp: 14000, speed: 2.0, type: "frank", color: "#9b59b6", range: 180, damage: 1100 },
+            colt: { name: "コルト", hp: 7200, maxHp: 7200, speed: 2.5, type: "colt", color: "#e74c3c", range: 500, damage: 720 }
+        };
+
+        let player = {};
+        let enemies = [];
+        let bullets = [];
+        let boxes = [];
+        let cubes = [];
+        let killLogs = [];
+        let gameActive = false;
+        let gameOverPhase = false;
+        let lastDamageTime = 0;
+        let camera = { x: 0, y: 0 };
+
+        const walls = [
+            { x: 300, y: 200, w: 80, h: 200 }, { x: 300, y: 500, w: 200, h: 80 },
+            { x: 700, y: 100, w: 80, h: 300 }, { x: 600, y: 700, w: 300, h: 80 },
+            { x: 200, y: 1000, w: 300, h: 80 }, { x: 400, y: 1150, w: 80, h: 250 },
+            { x: 1100, y: 200, w: 300, h: 80 }, { x: 1200, y: 400, w: 80, h: 300 },
+            { x: 2000, y: 800, w: 400, h: 80 }, { x: 2500, y: 1500, w: 80, h: 400 }
+        ];
+
+        const bushes = [
+            { x: 150, y: 150, w: 150, h: 150 }, { x: 450, y: 150, w: 200, h: 100 },
+            { x: 800, y: 200, w: 150, h: 250 }, { x: 150, y: 650, w: 250, h: 150 },
+            { x: 2200, y: 200, w: 350, h: 250 }, { x: 2700, y: 600, w: 400, h: 300 },
+            { x: 1500, y: 1300, w: 300, h: 300 }
+        ];
+
+        function generateBoxes() {
+            boxes = []; cubes = [];
+            for (let i = 0; i < 45; i++) {
+                let bx = Math.random() * (WORLD_WIDTH - 200) + 100;
+                let by = Math.random() * (WORLD_HEIGHT - 200) + 100;
+                boxes.push({ x: bx, y: by, w: 45, h: 45, hp: 3000, maxHp: 3000 });
+            }
+        }
+
+        function addKillLog(attackerName, victimName) {
+            killLogs.push({ text: attackerName + " が " + victimName + " を倒した！" });
+            if (killLogs.length > 3) killLogs.shift();
+        }
+
+        function startGame(charType) {
+            const stats = charStats[charType];
+            player = {
+                id: "player", x: 200, y: 200, size: 18, baseSize: 18,
+                name: stats.name, hp: stats.hp, maxHp: stats.maxHp,
+                speed: stats.speed, type: stats.type, color: "#1e90ff",
+                range: stats.range, damage: stats.damage, cubes: 0
+            };
+
+            enemies = [
+                { id: "boss", name: "ボスロボ", x: 3200, y: 2200, size: 26, baseSize: 26, speed: 1.2, hp: 30000, maxHp: 30000, color: "#333", cubes: 0, lastAttack: 0 },
+                { id: "cp1", name: "コルト1", x: 3000, y: 300, size: 18, baseSize: 18, speed: 2.0, hp: 7200, maxHp: 7200, color: "#e74c3c", type: "colt", range: 500, damage: 720, cubes: 0, lastAttack: 0 },
+                { id: "cp2", name: "エドガー2", x: 300, y: 2200, size: 18, baseSize: 18, speed: 2.6, hp: 6600, maxHp: 6600, color: "#bf55ec", type: "edgar", range: 80, damage: 1080, cubes: 0, lastAttack: 0 },
+                { id: "cp3", name: "フランク3", x: 1800, y: 400, size: 20, baseSize: 20, speed: 1.6, hp: 14000, maxHp: 14000, color: "#9b59b6", type: "frank", range: 180, damage: 1100, cubes: 0, lastAttack: 0 },
+                { id: "cp4", name: "シェリー4", x: 1800, y: 2000, size: 18, baseSize: 18, speed: 2.2, hp: 8000, maxHp: 8000, color: "#f39c12", type: "colt", range: 400, damage: 800, cubes: 0, lastAttack: 0 },
+                { id: "cp5", name: "コルト5", x: 1000, y: 1500, size: 18, baseSize: 18, speed: 2.0, hp: 7200, maxHp: 7200, color: "#e74c3c", type: "colt", range: 500, damage: 720, cubes: 0, lastAttack: 0 },
+                { id: "cp6", name: "エドガー6", x: 2500, y: 1000, size: 18, baseSize: 18, speed: 2.6, hp: 6600, maxHp: 6600, color: "#bf55ec", type: "edgar", range: 80, damage: 1080, cubes: 0, lastAttack: 0 },
+                { id: "cp7", name: "フランク7", x: 900, y: 800, size: 20, baseSize: 20, speed: 1.6, hp: 14000, maxHp: 14000, color: "#9b59b6", type: "frank", range: 180, damage: 1100, cubes: 0, lastAttack: 0 },
+                { id: "cp8", name: "シェリー8", x: 2800, y: 1600, size: 18, baseSize: 18, speed: 2.2, hp: 8000, maxHp: 8000, color: "#f39c12", type: "colt", range: 400, damage: 800, cubes: 0, lastAttack: 0 },
+                { id: "cp9", name: "エドガー9", x: 1500, y: 2300, size: 18, baseSize: 18, speed: 2.6, hp: 6600, maxHp: 6600, color: "#bf55ec", type: "edgar", range: 80, damage: 1080, cubes: 0, lastAttack: 0 }
+            ];
+
+            generateBoxes();
+            gasSafeBounds = { minX: 0, maxX: WORLD_WIDTH, minY: 0, maxY: WORLD_HEIGHT };
+            bullets = []; killLogs = [];
+            
+            document.getElementById("retryInfo").innerHTML = "木箱を壊して緑のキューブを拾え！HPと攻撃力がアップ！";
+            document.getElementById("retryInfo").style.color = "#55ff55";
+            document.getElementById("selectMenu").style.display = "none";
+            document.getElementById("gameUI").style.display = "block";
+            canvas.style.display = "block";
+            
+            gameActive = true; gameOverPhase = false;
+            lastDamageTime = Date.now();
+            update();
+        }
+
+        function returnToMenu() {
+            gameActive = false; gameOverPhase = false;
+            canvas.style.display = "none";
+            document.getElementById("gameUI").style.display = "none";
+            document.getElementById("selectMenu").style.display = "block";
+        }
+
+        function checkWallCollision(circle, wall) {
+            let closestX = Math.max(wall.x, Math.min(circle.x, wall.x + wall.w));
+            let closestY = Math.max(wall.y, Math.min(circle.y, wall.y + wall.h));
+            let distanceX = circle.x - closestX; let distanceY = circle.y - closestY;
+            return (distanceX * distanceX + distanceY * distanceY) < (circle.size * circle.size);
+        }
+
+        function isPointInRect(px, py, rect) {
+            return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+        }
+
+        canvas.addEventListener("mousedown", (e) => {
+            if (!gameActive || player.hp <= 0) return;
+            const rect = canvas.getBoundingClientRect();
+            const mouseWorldX = (e.clientX - rect.left) + camera.x;
+            const mouseWorldY = (e.clientY - rect.top) + camera.y;
+            const angle = Math.atan2(mouseWorldY - player.y, mouseWorldX - player.x);
+            fireWeapon(player, angle);
+        });
+
+        const keys = {};
+        window.addEventListener("keydown", (e) => {
+            if (e.key === " " || e.code === "Space") e.preventDefault();
+            keys[e.key] = true;
+
+            if (e.key === " " || e.code === "Space") {
+                if (gameOverPhase) { returnToMenu(); return; }
+
+                if (gameActive && player.hp > 0) {
+                    let closestTarget = null; let minDist = 99999;
+                    enemies.forEach(enemy => {
+                        if (enemy.hp > 0) {
+                            let d = Math.hypot(enemy.x - player.x, enemy.y - player.y);
+                            if (d < minDist) { minDist = d; closestTarget = enemy; }
+                        }
+                    });
+                    boxes.forEach(box => {
+                        let d = Math.hypot((box.x + box.w/2) - player.x, (box.y + box.h/2) - player.y);
+                        if (d < minDist) { minDist = d; closestTarget = box; }
+                    });
+
+                    if (closestTarget) {
+                        let tx = closestTarget.x + (closestTarget.w ? closestTarget.w/2 : 0);
+                        let ty = closestTarget.y + (closestTarget.h ? closestTarget.h/2 : 0);
+                        const autoAngle = Math.atan2(ty - player.y, tx - player.x);
+                        fireWeapon(player, autoAngle);
+                    }
+                }
+            }
+        });
+        window.addEventListener("keyup", (e) => keys[e.key] = false);
+
+        function fireWeapon(attacker, angle) {
+            let attackerName = attacker.id === "player" ? "あなた" : attacker.name;
+            for (let i = 0; i < 3; i++) {
+                setTimeout(() => {
+                    if (!gameActive || attacker.hp <= 0) return;
+                    if (attacker.type === "colt") {
+                        bullets.push({ owner: attacker.id, ownerName: attackerName, x: attacker.x, y: attacker.y, dx: Math.cos(angle) * 9, dy: Math.sin(angle) * 9, size: 4, damage: attacker.damage, color: "#ffff00", life: attacker.range / 9, type: "colt" });
+                    } else if (attacker.type === "edgar") {
+                        bullets.push({ owner: attacker.id, ownerName: attackerName, x: attacker.x, y: attacker.y, dx: Math.cos(angle) * 14, dy: Math.sin(angle) * 14, size: 10, damage: attacker.damage, color: "#ff00ff", life: attacker.range / 14, type: "edgar" });
+                    } else if (attacker.type === "frank") {
+                        for (let j = -1; j <= 1; j++) {
+                            const spreadAngle = angle + (j * 0.12);
+                            bullets.push({ owner: attacker.id, ownerName: attackerName, x: attacker.x, y: attacker.y, dx: Math.cos(spreadAngle) * 6, dy: Math.sin(spreadAngle) * 6, size: 12, damage: attacker.damage, color: "rgba(230, 126, 34, 0.8)", life: attacker.range / 6, type: "frank" });
+                        }
+                    }
+                }, i * 150);
+            }
+        }
+
+        function collectCube(character) {
+            character.cubes++; character.maxHp += 400; character.hp += 400;
+            character.damage = Math.floor(character.damage * 1.1);
+            character.size = character.baseSize + (character.cubes * 0.8);
+        }
+
+        function update() {
+            if (!gameActive) return;
+
+            let currentTime = Date.now();
+            let oldX = player.x; let oldY = player.y;
+
+            if (!gameOverPhase) {
+                if (keys["ArrowUp"]) player.y -= player.speed;
+                if (keys["ArrowDown"]) player.y += player.speed;
+                walls.forEach(wall => { if(checkWallCollision(player, wall)) player.y = oldY; });
+                boxes.forEach(box => { if(checkWallCollision(player, box)) player.y = oldY; });
+
+                if (keys["ArrowLeft"]) player.x -= player.speed;
+                if (keys["ArrowRight"]) player.x += player.speed;
+                walls.forEach(wall => { if(checkWallCollision(player, wall)) player.x = oldX; });
+                boxes.forEach(box => { if(checkWallCollision(player, box)) player.x = oldX; });
+            }
+
+            if (player.x < player.size) player.x = player.size;
+            if (player.x > WORLD_WIDTH - player.size) player.x = WORLD_WIDTH - player.size;
+            if (player.y < player.size) player.y = player.size;
+            if (player.y > WORLD_HEIGHT - player.size) player.y = WORLD_HEIGHT - player.size;
+
+            cubes.forEach((cube, index) => {
+                if (Math.hypot(cube.x - player.x, cube.y - player.y) < player.size + 15) {
+                    collectCube(player); cubes.splice(index, 1);
+                }
+            });
+
+            camera.x = player.x - canvas.width / 2; camera.y = player.y - canvas.height / 2;
+            if (camera.x < 0) camera.x = 0; if (camera.x > WORLD_WIDTH - canvas.width) camera.x = WORLD_WIDTH - canvas.width;
+            if (camera.y < 0) camera.y = 0; if (camera.y > WORLD_HEIGHT - canvas.height) camera.y = WORLD_HEIGHT - canvas.height;
+
+            if (!gameOverPhase) {
+                if (gasSafeBounds.maxX - gasSafeBounds.minX > MIN_SAFE_SIZE) { gasSafeBounds.minX += GAS_SPEED; gasSafeBounds.maxX -= GAS_SPEED; }
+                if (gasSafeBounds.maxY - gasSafeBounds.minY > MIN_SAFE_SIZE) { gasSafeBounds.minY += GAS_SPEED; gasSafeBounds.maxY -= GAS_SPEED; }
+            }
+
+            if (player.hp > 0 && (player.x < gasSafeBounds.minX || player.x > gasSafeBounds.maxX || player.y < gasSafeBounds.minY || player.y > gasSafeBounds.maxY)) {
+                player.hp -= Math.floor(player.maxHp * 0.005); lastDamageTime = currentTime;
+                if (player.hp <= 0) { player.hp = 0; addKillLog("毒ガス", "あなた"); }
+            }
+
+            enemies.forEach(enemy => {
+                if (enemy.hp <= 0 || gameOverPhase) return;
+                let enemyOldX = enemy.x; let enemyOldY = enemy.y;
+                let targetX = WORLD_WIDTH / 2; let targetY = WORLD_HEIGHT / 2;
+                let bestDist = 99999; let targetFound = false;
+
+                cubes.forEach(cube => {
+                    let d = Math.hypot(cube.x - enemy.x, cube.y - enemy.y);
+                    if (d < 400 && d < bestDist) { bestDist = d; targetX = cube.x; targetY = cube.y; targetFound = true; }
+                });
+
+                if (!targetFound) {
+                    if (player.hp > 0) { let d = Math.hypot(player.x - enemy.x, player.y - enemy.y); if (d < bestDist) { bestDist = d; targetX = player.x; targetY = player.y; } }
+                    enemies.forEach(other => { if (other.id !== enemy.id && other.hp > 0) { let d = Math.hypot(other.x - enemy.x, other.y - enemy.y); if (d < bestDist) { bestDist = d; targetX = other.x; targetY = other.y; } } });
+                }
+
+                if (enemy.x < gasSafeBounds.minX || enemy.x > gasSafeBounds.maxX || enemy.y < gasSafeBounds.minY || enemy.y > gasSafeBounds.maxY) {
+                    targetX = WORLD_WIDTH / 2; targetY = WORLD_HEIGHT / 2;
+                }
+
+                if (enemy.x > targetX) enemy.x -= enemy.speed; if (enemy.x < targetX) enemy.x += enemy.speed;
+                walls.forEach(wall => { if(checkWallCollision(enemy, wall)) enemy.x = enemyOldX; });
+                boxes.forEach(box => { if(checkWallCollision(enemy, box)) enemy.x = enemyOldX; });
+
+                if (enemy.y > targetY) enemy.y -= enemy.speed; if (enemy.y < targetY) enemy.y += enemy.speed;
+                walls.forEach(wall => { if(checkWallCollision(enemy, wall)) enemy.y = enemyOldY; });
+                boxes.forEach(box => { if(checkWallCollision(enemy, box)) enemy.y = enemyOldY; });
+
+                cubes.forEach((cube, index) => { if (Math.hypot(cube.x - enemy.x, cube.y - enemy.y) < enemy.size + 15) { collectCube(enemy); cubes.splice(index, 1); } });
+
+                if (enemy.type && bestDist < enemy.range + 40 && currentTime - enemy.lastAttack > 2500) {
+                    let attackAngle = Math.atan2(targetY - enemy.y, targetX - enemy.x);
+                    fireWeapon(enemy, attackAngle); enemy.lastAttack = currentTime;
+                }
+            });
+
+            enemies = enemies.filter(e => e.hp > 0);
+
+            if (currentTime - lastDamageTime > 3000 && player.hp > 0 && player.hp < player.maxHp) {
+                player.hp += Math.floor(player.maxHp * 0.002); if (player.hp > player.maxHp) player.hp = player.maxHp;
+            }
+
+            bullets.forEach((b, index) => {
+                b.x += b.dx; b.y += b.dy; b.life--;
+                if (b.type !== "frank") { walls.forEach(wall => { if (isPointInRect(b.x, b.y, wall)) b.life = 0; }); }
+
+                boxes.forEach((box, bIdx) => {
+                    if (isPointInRect(b.x, b.y, box)) {
+                        box.hp -= b.damage; b.life = 0;
+                        if (box.hp <= 0) { cubes.push({ x: box.x + box.w/2, y: box.y + box.h/2 }); boxes.splice(bIdx, 1); }
+                    }
+                });
+
+                if (b.life <= 0) { bullets.splice(index, 1); return; }
+
+                if (player.hp > 0 && b.owner !== "player" && Math.hypot(b.x - player.x, b.y - player.y) < player.size + b.size) {
+                    player.hp -= b.damage; lastDamageTime = currentTime; bullets.splice(index, 1);
+                    if (player.hp <= 0) { player.hp = 0; addKillLog(b.ownerName, "あなた"); }
+                    return;
+                }
+                enemies.forEach(enemy => {
+                    if (enemy.hp > 0 && b.owner !== enemy.id && Math.hypot(b.x - enemy.x, b.y - enemy.y) < enemy.size + b.size) {
+                        enemy.hp -= b.damage;
+                        if (b.type === "edgar" && b.owner === "player") player.hp = Math.min(player.maxHp, player.hp + Math.floor(b.damage * 0.4));
+                        if (b.type !== "frank") bullets.splice(index, 1);
+                        if (enemy.hp <= 0) { enemy.hp = 0; addKillLog(b.ownerName, enemy.name); cubes.push({ x: enemy.x, y: enemy.y }); }
+                    }
+                });
+            });
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.save(); ctx.translate(-camera.x, -camera.y);
+
+            bushes.forEach(bush => { ctx.fillStyle = "#55a655"; ctx.fillRect(bush.x, bush.y, bush.w, bush.h); });
+            walls.forEach(wall => { ctx.fillStyle = "#a0522d"; ctx.fillRect(wall.x, wall.y, wall.w, wall.h); ctx.strokeRect(wall.x, wall.y, wall.w, wall.h); });
+            boxes.forEach(box => { ctx.fillStyle = "#d35400"; ctx.fillRect(box.x, box.y, box.w, box.h); });
+            cubes.forEach(cube => { ctx.fillStyle = "#2ecc71"; ctx.beginPath(); ctx.moveTo(cube.x, cube.y - 12); ctx.lineTo(cube.x + 12, cube.y); ctx.lineTo(cube.x, cube.y + 12); ctx.lineTo(cube.x - 12, cube.y); ctx.closePath(); ctx.fill(); });
+
+            if (player.hp > 0) {
+                ctx.fillStyle = player.color; ctx.beginPath(); ctx.arc(player.x, player.y, player.size, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.fillText(player.name + " ⚡" + player.cubes, player.x - 25, player.y + player.size + 15);
+                ctx.fillStyle = "#ccffcc"; ctx.font = "9px sans-serif"; ctx.fillText(Math.floor(player.hp) + " / " + player.maxHp, player.x - 25, player.y - 35);
+                ctx.fillStyle = "#ff0000"; ctx.fillRect(player.x - 25, player.y - 30, 50, 5); ctx.fillStyle = "#00ff00"; ctx.fillRect(player.x - 25, player.y - 30, (player.hp/player.maxHp)*50, 5);
+            }
+
+            enemies.forEach(enemy => {
+                ctx.fillStyle = enemy.color; ctx.beginPath(); ctx.arc(enemy.x, enemy.y, enemy.size, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = "#fff"; ctx.font = "bold 11px sans-serif"; ctx.fillText(enemy.name + " ⚡" + enemy.cubes, enemy.x - 25, enemy.y + enemy.size + 14);
+                ctx.fillStyle = "#ffcccc"; ctx.font = "9px sans-serif"; ctx.fillText(Math.floor(enemy.hp) + " / " + enemy.maxHp, enemy.x - 25, enemy.y - 33);
+                ctx.fillStyle = "#ff0000"; ctx.fillRect(enemy.x - 25, enemy.y - 28, 50, 4); ctx.fillStyle = "#00ff00"; ctx.fillRect(enemy.x - 25, enemy.y - 28, (enemy.hp/enemy.maxHp)*50, 4);
+            });
+
+            bullets.forEach(b => { ctx.fillStyle = b.color; ctx.beginPath(); ctx.arc(b.x, b.y, b.size, 0, Math.PI*2); ctx.fill(); });
+
+            ctx.fillStyle = "rgba(46, 204, 113, 0.35)";
+            if(gasSafeBounds.minX > 0) ctx.fillRect(0, 0, gasSafeBounds.minX, WORLD_WIDTH); if(gasSafeBounds.maxX < WORLD_WIDTH) ctx.fillRect(gasSafeBounds.maxX, 0, WORLD_WIDTH - gasSafeBounds.maxX, WORLD_HEIGHT);
+            ctx.fillRect(gasSafeBounds.minX, 0, gasSafeBounds.maxX - gasSafeBounds.minX, gasSafeBounds.minY); ctx.fillRect(gasSafeBounds.minX, gasSafeBounds.maxY, gasSafeBounds.maxX - gasSafeBounds.minX, WORLD_HEIGHT - gasSafeBounds.maxY);
+            ctx.restore();
+
+            // 現在の総生存人数
+            let aliveCount = enemies.length + (player.hp > 0 ? 1 : 0);
+
+            // 【追加機能】画面左上に黒帯背景で生存人数を大きく表示（例: 残り: 11人）
+            ctx.fillStyle = "rgba(0, 0, 0, 0.7)"; ctx.fillRect(20, 20, 160, 40);
+            ctx.fillStyle = "#fff"; ctx.font = "bold 18px sans-serif";
+            ctx.fillText("残り: " + aliveCount + " 人", 35, 47);
+
+            // 特大キルログ右上表示
+            killLogs.forEach((log, lIdx) => {
+                ctx.fillStyle = "rgba(0, 0, 0, 0.75)"; ctx.fillRect(canvas.width - 360, 20 + lIdx * 45, 340, 35);
+                ctx.fillStyle = "#ffcc00"; ctx.font = "bold 15px sans-serif"; ctx.fillText(log.text, canvas.width - 345, 43 + lIdx * 45);
+            });
+
+            if (player.hp <= 0) {
+                ctx.fillStyle = "#ff3333"; ctx.font = "bold 40px sans-serif"; ctx.fillText("RANK " + (aliveCount + 1), canvas.width/2 - 80, canvas.height/2);
+                document.getElementById("retryInfo").innerHTML = "【終了】スペースキーを押してもう一度プレイ！"; document.getElementById("retryInfo").style.color = "#ff5555";
+                gameOverPhase = true;
+            } else if (enemies.length === 0) {
+                ctx.fillStyle = "#33ccff"; ctx.font = "bold 40px sans-serif"; ctx.fillText("RANK 1 (VICTORY!)", canvas.width/2 - 160, canvas.height/2);
+                document.getElementById("retryInfo").innerHTML = "【1位！】スペースキーを押してもう一度プレイ！"; document.getElementById("retryInfo").style.color = "#33ccff";
+                gameOverPhase = true;
+            }
+            requestAnimationFrame(update);
+        }
+    </script>
+</body>
+</html>
